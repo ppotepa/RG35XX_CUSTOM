@@ -25,19 +25,72 @@ check_dependencies() {
             missing_packages+=("$pkg")
         fi
     done
-    
+
     if [ ${#missing_packages[@]} -gt 0 ]; then
         log_info "Installing missing packages: ${missing_packages[*]}"
-        apt install -y "${missing_packages[@]}" || log_error "Failed to install packages"
+        apt install -y "${missing_packages[@]}" || {
+            log_warn "Some packages failed to install from repository"
+            
+            # Try manual installation for critical boot image tools
+            if [[ " ${missing_packages[*]} " =~ " abootimg " ]]; then
+                log_info "Attempting manual abootimg installation..."
+                if ! command -v abootimg >/dev/null 2>&1; then
+                    cd /tmp
+                    git clone https://github.com/ggrandou/abootimg.git
+                    cd abootimg
+                    make && cp abootimg /usr/local/bin/
+                    cd / && rm -rf /tmp/abootimg
+                fi
+            fi
+            
+            if [[ " ${missing_packages[*]} " =~ " android-tools-mkbootimg " ]]; then
+                log_info "Attempting mkbootimg installation via pip..."
+                command -v pip3 >/dev/null 2>&1 && pip3 install mkbootimg
+            fi
+        }
     fi
-    
+
+    # Verify critical commands
+    local missing_commands=()
     for cmd in "${CRITICAL_COMMANDS[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_error "Critical command missing after installation: $cmd"
-            return 1
+            missing_commands+=("$cmd")
         fi
     done
     
+    # Check for boot image tools (at least one must be available, prefer abootimg)
+    local boot_tools=("abootimg" "mkbootimg")
+    local boot_tool_available=false
+    local working_tool=""
+    
+    # Check abootimg first (preferred)
+    if command -v abootimg >/dev/null 2>&1; then
+        boot_tool_available=true
+        working_tool="abootimg"
+        log_success "Boot image tool available: abootimg (preferred)"
+    elif command -v mkbootimg >/dev/null 2>&1; then
+        # Test if mkbootimg actually works
+        if mkbootimg --help >/dev/null 2>&1; then
+            boot_tool_available=true
+            working_tool="mkbootimg"
+            log_success "Boot image tool available: mkbootimg"
+        else
+            log_warn "mkbootimg found but not working (gki dependency issues)"
+        fi
+    fi
+    
+    if [[ "$boot_tool_available" == "false" ]]; then
+        log_error "No working boot image tools available! Need abootimg or working mkbootimg for RG35XX_H"
+        log_info "Try installing abootimg: apt install abootimg"
+        log_info "Or run: sudo ./install_dependencies.sh install"
+        return 1
+    fi
+    
+    if [ ${#missing_commands[@]} -gt 0 ]; then
+        log_error "Critical commands missing after installation: ${missing_commands[*]}"
+        return 1
+    fi
+
     log_success "All dependencies installed and verified"
 }
 

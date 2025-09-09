@@ -15,12 +15,15 @@ RG35HAXX Custom Linux Builder
 Usage: $0 [OPTIONS]
 
 Options:
-  --skip-build      Skip kernel/rootfs build, flash existing files only
+  --skip-build      Skip kernel build, flash existing files (still builds BusyBox if needed)
   --force-build     Force rebuild even if output exists
   --skip-sd-check   Skip SD card validation at startup
   --skip-backup     Skip SD card backup before flashing (faster)
-  --dtb=N           Select DTB variant (0=rg35xx-h, 1=rg35xx-h-rev6, 2=rg40xx-h)
-  --package=MODE    Boot image packaging mode (catdt or with-dt)
+    --dtb=N           Select DTB variant (0=rg35xx-h, 1=rg35xx-h-rev6, 2=rg40xx-h)
+    --package=MODE    Boot image packaging mode (catdt or with-dt)
+    --cmdline=STR     Override kernel command line (forces unless --no-force-cmdline used)
+    --pagesize=N      Override boot image page size (default 2048)
+    --no-force-cmdline  Do not set CONFIG_CMDLINE_FORCE (allow bootloader append)
   --help, -h        Show this help message
 
 Examples:
@@ -31,6 +34,21 @@ Examples:
   sudo ./run_ubuntu.sh --skip-sd-check          # Build without requiring SD card
   sudo ./run_ubuntu.sh --force-build            # Force complete rebuild
 EOF
+
+    # Advanced tools reference
+    echo
+    echo "Advanced Tools:"
+    echo "  ./build_verification.sh      # Build output validation & reporting"
+    echo "  ./advanced_sd_tools.sh       # SD diagnostics, backup, recovery, optimization"
+    echo "  ./automated_testing.sh       # Automated testing & integration checks"
+    echo "  ./dev_tools.sh               # Developer workflow utilities"
+    echo "  ./fix_boot_image.sh          # Manual boot image page size fix"
+    echo "  ./dtb_fallback.sh            # Automatic DTB/packaging cycling"
+    echo "  ./restore_backups.sh         # Restore from backup"
+    echo "  ./test_progress.sh           # Progress bar testing"
+    echo "  ./install_dependencies.sh    # Install all required build tools"
+    echo
+    echo "See README.md and ADVANCED_FEATURES_COMPLETE.md for full documentation."
 }
 
 # Parse command line arguments (before sourcing logger to avoid issues)
@@ -40,6 +58,10 @@ SKIP_SD_CHECK=false
 SKIP_BACKUP=false
 DTB_INDEX=0
 PACKAGE_MODE="catdt"
+CUSTOM_CMDLINE="${CUSTOM_CMDLINE:-}"
+PAGE_SIZE_OVERRIDE=""
+NO_FORCE_CMDLINE="false"
+FULL_VERIFY="false"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -75,6 +97,21 @@ while [[ $# -gt 0 ]]; do
             fi
             shift
             ;;
+        --cmdline=*)
+            CUSTOM_CMDLINE="${1#*=}"
+            shift
+            ;;
+        --pagesize=*)
+            PAGE_SIZE_OVERRIDE="${1#*=}"
+            if ! [[ "$PAGE_SIZE_OVERRIDE" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: pagesize must be numeric" >&2; exit 1;
+            fi
+            shift
+            ;;
+        --no-force-cmdline)
+            NO_FORCE_CMDLINE="true"; shift ;;
+        --full-verify)
+            FULL_VERIFY="true"; shift ;;
         --help|-h)
             show_early_help
             exit 0
@@ -91,7 +128,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-export SKIP_BUILD FORCE_BUILD SKIP_SD_CHECK SKIP_BACKUP DTB_INDEX PACKAGE_MODE
+export SKIP_BUILD FORCE_BUILD SKIP_SD_CHECK SKIP_BACKUP DTB_INDEX PACKAGE_MODE CUSTOM_CMDLINE PAGE_SIZE_OVERRIDE NO_FORCE_CMDLINE FULL_VERIFY
 
 # Now source all modules safely
 echo "Loading configuration..."
@@ -138,10 +175,11 @@ show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo
     echo "Options:"
-    echo "  --skip-build      Skip kernel/rootfs build, flash existing files only"
+    echo "  --skip-build      Skip kernel build, flash existing files (still builds BusyBox if needed)"
     echo "  --force-build     Force rebuild even if output exists"
     echo "  --skip-sd-check   Skip SD card validation at startup"
     echo "  --skip-backup     Skip SD card backup before flashing (faster)"
+    echo "    --full-verify     After flashing compute full SHA256 of boot partition (slow)"
     echo "  --help, -h        Show this help message"
     echo
     echo "Examples:"
@@ -260,6 +298,21 @@ main() {
             log_warn "⚠️ Rootfs archive not found - will build minimal rootfs"
         fi
         
+        # Always ensure BusyBox is available, even with --skip-build
+        log_step "Ensuring BusyBox is available (required for rootfs)"
+        setup_build_environment
+        
+        # Always build BusyBox if it doesn't exist
+        if [[ ! -d "$BUILD_DIR/busybox" ]] || [[ ! -f "$BUILD_DIR/busybox/busybox" ]]; then
+            log_info "BusyBox not found - building it now..."
+            get_busybox_source || { log_error "Failed to get BusyBox source"; exit 1; }
+            configure_busybox || { log_error "Failed to configure BusyBox"; exit 1; }
+            build_busybox || { log_error "Failed to build BusyBox"; exit 1; }
+            log_success "✅ BusyBox build completed"
+        else
+            log_success "✅ BusyBox already available"
+        fi
+
         # Allow partial skip if at least kernel is found
         if [[ "$KERNEL_FOUND" == "true" ]]; then
             # Create minimal rootfs if needed
@@ -278,12 +331,17 @@ main() {
         fi
         
         # Copy outputs to temp build directory for flashing
-        setup_build_environment
         # Files are already in OUTPUT_DIR, no need to copy
         log_info "Build outputs ready for flashing"
     else
         # Full build process
         log_step "Starting full build process"
+
+        # Ensure a clean output directory when performing a full build
+        if [[ -d "$OUTPUT_DIR" ]]; then
+            log_info "Removing existing build output directory for clean build: $OUTPUT_DIR"
+            rm -rf "$OUTPUT_DIR" || { log_warn "Failed to remove $OUTPUT_DIR"; }
+        fi
         
         # Check if we should force rebuild
         if [[ "$FORCE_BUILD" == "false" ]] && [[ -f "$OUTPUT_DIR/zImage-dtb" ]] && [[ -f "$OUTPUT_DIR/rootfs.tar.gz" ]]; then

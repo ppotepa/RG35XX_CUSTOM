@@ -31,8 +31,8 @@ export MAKEFLAGS="-j$BUILD_JOBS"
 export CCACHE_DIR="/tmp/ccache"
 export CCACHE_MAXSIZE="2G"
 
-# Aggressive compiler optimizations for speed
-export EXTRA_CFLAGS="-O3 -march=native -mtune=native -flto -pipe -fno-plt"
+# Aggressive compiler optimizations for ARM64 cross-compilation
+export EXTRA_CFLAGS="-O3 -march=armv8-a -mtune=cortex-a53 -flto -pipe -fno-plt"
 export EXTRA_LDFLAGS="-flto -Wl,--as-needed"
 
 # Device specific
@@ -57,6 +57,12 @@ export DEVICE_SOC="Allwinner H700"
 export DEVICE_DTB="sun50i-h700-anbernic-rg35xx-h.dtb"
 export DEVICE_DTS="sun50i-h700-anbernic-rg35xx-h.dts"
 
+# Boot image defaults
+export PAGE_SIZE="${PAGE_SIZE:-2048}"
+export DEFAULT_CMDLINE="console=tty0 loglevel=7 ignore_loglevel"
+export FORCE_CMDLINE="${FORCE_CMDLINE:-true}"   # can be toggled by --no-force-cmdline
+export CUSTOM_CMDLINE="${CUSTOM_CMDLINE:-$DEFAULT_CMDLINE}"  # override with --cmdline=
+
 # Legacy variable names for compatibility
 export RG35XX_DTS="$DEVICE_DTS"
 export H616_DTSI="sun50i-h616.dtsi"
@@ -72,6 +78,7 @@ export REQUIRED_PACKAGES=(
     "gcc-aarch64-linux-gnu" "wget" "curl" "tar" "rsync" "cpio" "util-linux"
     "e2fsprogs" "device-tree-compiler" "build-essential" "ca-certificates" "pv"
     "ccache" "ninja-build" "moreutils" "parallel"  # Speed optimization tools
+    "abootimg" "android-tools-mkbootimg" "android-tools-fsutils"  # Boot image tools for RG35XX_H
 )
 
 export CRITICAL_COMMANDS=(

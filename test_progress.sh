@@ -46,8 +46,7 @@ for i in {1..100}; do
     update_progress $i "Building kernel..."
     # Update overall progress proportionally
     overall_progress=$((5 + (i * 35 / 100)))
-    update_progress $overall_progress "Kernel build: $i%" "overall"
-    display_progress_bars
+    update_progress $overall_progress "Kernel build: $i%"
     sleep 0.02
 done
 end_progress "Kernel complete"
@@ -59,8 +58,7 @@ for i in {1..100}; do
     update_progress $i "Building BusyBox..."
     # Update overall progress proportionally  
     overall_progress=$((40 + (i * 20 / 100)))
-    update_progress $overall_progress "BusyBox build: $i%" "overall"
-    display_progress_bars
+    update_progress $overall_progress "BusyBox build: $i%"
     sleep 0.01
 done
 end_progress "BusyBox complete"
@@ -72,8 +70,7 @@ for i in {1..100}; do
     update_progress $i "Creating rootfs..."
     # Update overall progress proportionally
     overall_progress=$((60 + (i * 20 / 100)))
-    update_progress $overall_progress "RootFS: $i%" "overall"
-    display_progress_bars
+    update_progress $overall_progress "RootFS: $i%"
     sleep 0.01
 done
 end_progress "RootFS complete"
@@ -85,8 +82,7 @@ for i in {1..100}; do
     update_progress $i "Flashing to device..."
     # Update overall progress proportionally
     overall_progress=$((80 + (i * 20 / 100)))
-    update_progress $overall_progress "Flash: $i%" "overall"
-    display_progress_bars
+    update_progress $overall_progress "Flash: $i%"
     sleep 0.01
 done
 end_progress "Flash complete"

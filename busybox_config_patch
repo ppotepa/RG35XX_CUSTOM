@@ -1,0 +1,67 @@
+# BusyBox configuration overrides for RG35XX_H
+# Disable networking utilities that require kernel headers not available in cross-compilation
+
+# Disable traffic control utility (causes kernel header conflicts)
+# CONFIG_TC is not set
+# CONFIG_FEATURE_TC_INGRESS is not set
+
+# Enable static build for embedded system
+CONFIG_STATIC=y
+
+# Disable additional networking features that might cause kernel header issues
+# CONFIG_BRCTL is not set
+# CONFIG_VCONFIG is not set
+
+# Ensure compatibility with limited embedded environment
+CONFIG_DESKTOP=n
+CONFIG_EXTRA_COMPAT=n
+CONFIG_FEDORA_COMPAT=n
+
+# Disable features that might cause issues in cross-compilation
+CONFIG_FEATURE_DEVFS=n
+
+# Keep essential networking tools but disable problematic ones
+CONFIG_PING=y
+CONFIG_PING6=y
+CONFIG_WGET=y
+CONFIG_TFTP=y
+CONFIG_NC=y
+CONFIG_NETSTAT=y
+CONFIG_ARP=y
+CONFIG_ROUTE=y
+CONFIG_IFCONFIG=y
+
+# Keep essential system utilities
+CONFIG_PS=y
+CONFIG_TOP=y
+CONFIG_FREE=y
+CONFIG_MOUNT=y
+CONFIG_UMOUNT=y
+CONFIG_LS=y
+CONFIG_CP=y
+CONFIG_MV=y
+CONFIG_RM=y
+CONFIG_CAT=y
+CONFIG_GREP=y
+CONFIG_SED=y
+CONFIG_AWK=y
+CONFIG_TAR=y
+CONFIG_GZIP=y
+CONFIG_GUNZIP=y
+CONFIG_FIND=y
+CONFIG_XARGS=y
+CONFIG_SORT=y
+CONFIG_UNIQ=y
+CONFIG_HEAD=y
+CONFIG_TAIL=y
+CONFIG_WC=y
+CONFIG_CUT=y
+CONFIG_TR=y
+CONFIG_MKDIR=y
+CONFIG_RMDIR=y
+CONFIG_CHMOD=y
+CONFIG_CHOWN=y
+CONFIG_DD=y
+CONFIG_DF=y
+CONFIG_DU=y
+CONFIG_SYNC=y

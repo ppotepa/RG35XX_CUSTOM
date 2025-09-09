@@ -3,6 +3,8 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/logger.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../config/constants.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/ramdisk.sh" 2>/dev/null || true
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/bootimg.sh" 2>/dev/null || true
 
 get_linux_source() {
     log_step "Getting Linux kernel source"
@@ -70,11 +72,21 @@ configure_kernel() {
     # Apply custom configuration
     apply_custom_config
     
-    # Force cmdline settings for guaranteed console output
-    log "Forcing console cmdline settings..."
-    echo "CONFIG_CMDLINE=\"console=tty0 loglevel=7 ignore_loglevel\"" >> .config
+    # Force or optionally set kernel command line
+    local cmdline_value
+    if [[ -n "${CUSTOM_CMDLINE:-}" ]]; then
+        cmdline_value="$CUSTOM_CMDLINE"
+    else
+        cmdline_value="$DEFAULT_CMDLINE"
+    fi
+    log_info "Applying kernel cmdline: $cmdline_value"
+    echo "CONFIG_CMDLINE=\"$cmdline_value\"" >> .config
     echo "CONFIG_CMDLINE_BOOL=y" >> .config
-    echo "CONFIG_CMDLINE_FORCE=y" >> .config
+    if [[ "${NO_FORCE_CMDLINE:-false}" == "false" ]]; then
+        echo "CONFIG_CMDLINE_FORCE=y" >> .config
+    else
+        log_warn "CONFIG_CMDLINE_FORCE disabled by user"
+    fi
     
     log "Resolving configuration dependencies..."
     make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
@@ -110,17 +122,14 @@ apply_custom_config() {
     if [[ -n "$patch_dir" ]]; then
         # Apply all configs from directory
         log_info "Merging configs from directory: $patch_dir"
-        ./scripts/kconfig/merge_config.sh -m .config "$patch_dir"/*.config
+        ./scripts/kconfig/merge_config.sh -m .config "$patch_dir"/*.config || log_warn "merge_config.sh returned non-zero"
     elif [[ -n "$patch_file" ]]; then
         # Apply single config file
         log_info "Merging config from file: $patch_file"
-        ./scripts/kconfig/merge_config.sh -m .config "$patch_file"
+        ./scripts/kconfig/merge_config.sh -m .config "$patch_file" || log_warn "merge_config.sh returned non-zero"
     else
         log_warn "No config patch applied - using default config"
     fi
-    fi
-    
-    rm -f "$temp_config"
 }
 
 apply_config_fallback() {
@@ -240,64 +249,113 @@ create_kernel_image() {
 
 package_boot_images() {
     log_info "Creating boot images for both packaging modes..."
-    
-    # Check for stock boot image to extract ramdisk
-    local stock_boot="/tmp/boot-stock.img"
-    local ramdisk="/tmp/ramdisk.img"
-    
+
+    # Attempt unified ramdisk extraction from any existing backup (heuristic)
+    local ramdisk="/tmp/rg35haxx_ramdisk.cpio.gz"
     if [[ ! -f "$ramdisk" ]]; then
-        log_warn "Stock ramdisk not found. Will create a minimal ramdisk."
-        # Create minimal empty ramdisk if needed
-        mkdir -p /tmp/empty_ramdisk
-        cd /tmp/empty_ramdisk
-        find . | cpio -H newc -o 2>/dev/null | gzip > "$ramdisk"
+        if [[ -f "$SCRIPT_DIR/backups/boot-p4-backup.img" ]]; then
+            extract_ramdisk "$SCRIPT_DIR/backups/boot-p4-backup.img" "$ramdisk" || true
+        fi
     fi
-    
+    # Create minimal if still missing
+    if [[ ! -f "$ramdisk" ]]; then
+        log_warn "No stock ramdisk available; generating minimal placeholder"
+        local tmpdir=$(mktemp -d)
+        (cd "$tmpdir" && mkdir -p dev proc sys etc && echo '#!/bin/sh' > init && chmod +x init && find . | cpio -H newc -o | gzip > "$ramdisk")
+        rm -rf "$tmpdir"
+    fi
+
     # catdt mode (Image+DTB concatenation)
     log_info "Creating boot image (catdt mode)..."
-    local kernel_dtb="$OUTPUT_DIR/zImage-dtb" 
+    local kernel_dtb="$OUTPUT_DIR/zImage-dtb"
     if command -v mkbootimg >/dev/null 2>&1; then
-        mkbootimg --kernel "$kernel_dtb" 
-            --ramdisk "$ramdisk" 
-            --pagesize 2048 
-            --cmdline "console=tty0 loglevel=7 ignore_loglevel" 
-            -o "$OUTPUT_DIR/boot-catdt.img"
+        local mkargs
+        if [[ -f "$SCRIPT_DIR/backups/boot-p4-backup.img" ]]; then
+            mkargs=$(bootimg_generate_mkbootimg_args "$SCRIPT_DIR/backups/boot-p4-backup.img") || mkargs="--pagesize $BOOT_IMAGE_PAGE_SIZE"
+        else
+            mkargs="--pagesize $BOOT_IMAGE_PAGE_SIZE"
+        fi
+        # Ensure correct page size is used
+        mkargs=$(echo "$mkargs" | sed "s/--pagesize [0-9]*/--pagesize $BOOT_IMAGE_PAGE_SIZE/")
+        mkbootimg --kernel "$kernel_dtb" --ramdisk "$ramdisk" $mkargs \
+            --cmdline "${CUSTOM_CMDLINE:-$DEFAULT_CMDLINE}" -o "$OUTPUT_DIR/boot-catdt.img"
+        
+        # Verify and fix page size if needed
+        if ! verify_boot_image_page_size "$OUTPUT_DIR/boot-catdt.img"; then
+            log_warn "Fixing boot image page size for catdt mode..."
+            fix_boot_image_page_size "$OUTPUT_DIR/boot-catdt.img" "$OUTPUT_DIR/boot-catdt-fixed.img"
+            mv "$OUTPUT_DIR/boot-catdt-fixed.img" "$OUTPUT_DIR/boot-catdt.img"
+        fi
     else
-        log_warn "mkbootimg not found, using abootimg instead"
-        abootimg --create "$OUTPUT_DIR/boot-catdt.img" 
-            -f "$OUTPUT_DIR/bootimg.cfg" 
-            -k "$kernel_dtb" 
-            -r "$ramdisk"
+        # Fallback: create using bootimg helper
+        log_warn "mkbootimg not found, using alternative method for catdt"
+        create_boot_image_from_components "$kernel_dtb" "$ramdisk" "$OUTPUT_DIR/boot-catdt.img"
     fi
-    
+
     # with-dt mode (separate DTB)
     log_info "Creating boot image (with-dt mode)..."
     if command -v mkbootimg >/dev/null 2>&1; then
-        mkbootimg --kernel "$OUTPUT_DIR/Image" 
-            --dt "$OUTPUT_DIR/dtb.img" 
-            --ramdisk "$ramdisk" 
-            --pagesize 2048 
-            --cmdline "console=tty0 loglevel=7 ignore_loglevel" 
+        local mkargs2
+        if [[ -f "$SCRIPT_DIR/backups/boot-p4-backup.img" ]]; then
+            mkargs2=$(bootimg_generate_mkbootimg_args "$SCRIPT_DIR/backups/boot-p4-backup.img") || mkargs2="--pagesize $BOOT_IMAGE_PAGE_SIZE"
+        else
+            mkargs2="--pagesize $BOOT_IMAGE_PAGE_SIZE"
+        fi
+        # Ensure correct page size is used
+        mkargs2=$(echo "$mkargs2" | sed "s/--pagesize [0-9]*/--pagesize $BOOT_IMAGE_PAGE_SIZE/")
+        mkbootimg --kernel "$OUTPUT_DIR/Image" --dt "$OUTPUT_DIR/dtb.img" \
+            --ramdisk "$ramdisk" $mkargs2 --cmdline "${CUSTOM_CMDLINE:-$DEFAULT_CMDLINE}" \
             -o "$OUTPUT_DIR/boot-with-dt.img"
+        
+        # Verify and fix page size if needed
+        if ! verify_boot_image_page_size "$OUTPUT_DIR/boot-with-dt.img"; then
+            log_warn "Fixing boot image page size for with-dt mode..."
+            fix_boot_image_page_size "$OUTPUT_DIR/boot-with-dt.img" "$OUTPUT_DIR/boot-with-dt-fixed.img"
+            mv "$OUTPUT_DIR/boot-with-dt-fixed.img" "$OUTPUT_DIR/boot-with-dt.img"
+        fi
     else
-        log_warn "mkbootimg not found, using abootimg instead"
-        abootimg --create "$OUTPUT_DIR/boot-with-dt.img" 
-            -f "$OUTPUT_DIR/bootimg.cfg" 
-            -k "$OUTPUT_DIR/Image" 
-            -r "$ramdisk" 
-            -s "$OUTPUT_DIR/dtb.img"
+        # Fallback: create using bootimg helper
+        log_warn "mkbootimg not found, using alternative method for with-dt"
+        create_boot_image_from_components "$OUTPUT_DIR/Image" "$ramdisk" "$OUTPUT_DIR/boot-with-dt.img" "$OUTPUT_DIR/dtb.img"
     fi
-    
-    # Create a symbolic link to the chosen packaging method
-    if [[ "$PACKAGE_MODE" == "catdt" ]]; then
+
+    # Select preferred packaging mode and create boot-new.img
+    if [[ "$PACKAGE_MODE" == "catdt" && -f "$OUTPUT_DIR/boot-catdt.img" ]]; then
         cp "$OUTPUT_DIR/boot-catdt.img" "$OUTPUT_DIR/boot-new.img"
         log_info "Using catdt mode boot image as default"
-    else
+    elif [[ -f "$OUTPUT_DIR/boot-with-dt.img" ]]; then
         cp "$OUTPUT_DIR/boot-with-dt.img" "$OUTPUT_DIR/boot-new.img"
         log_info "Using with-dt mode boot image as default"
+    else
+        log_error "No boot image was created successfully!"
+        # Emergency fallback: create basic boot image
+        log_info "Creating emergency fallback boot image..."
+        if [[ -f "$OUTPUT_DIR/zImage-dtb" ]]; then
+            create_boot_image_from_components "$OUTPUT_DIR/zImage-dtb" "$ramdisk" "$OUTPUT_DIR/boot-new.img"
+        elif [[ -f "$OUTPUT_DIR/Image" ]]; then
+            create_boot_image_from_components "$OUTPUT_DIR/Image" "$ramdisk" "$OUTPUT_DIR/boot-new.img"
+        else
+            log_error "No kernel image available for boot image creation!"
+            return 1
+        fi
     fi
-    
-    log_info "Boot images created successfully"
+
+    # Final verification of boot-new.img
+    if [[ -f "$OUTPUT_DIR/boot-new.img" ]]; then
+        log_info "Verifying final boot image..."
+        get_boot_image_info "$OUTPUT_DIR/boot-new.img"
+        if verify_boot_image_page_size "$OUTPUT_DIR/boot-new.img"; then
+            log_success "Boot image created successfully with correct page size: $OUTPUT_DIR/boot-new.img"
+        else
+            log_error "Final boot image has incorrect page size!"
+            return 1
+        fi
+    else
+        log_error "boot-new.img was not created!"
+        return 1
+    fi
+
+    log_info "Boot images creation step finished"
 }
 
 install_kernel_modules() {

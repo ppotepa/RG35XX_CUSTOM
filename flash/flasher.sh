@@ -1,10 +1,17 @@
 #!/bin/bash
 # SD card flashing functionality
+# Ensure bash doesn't exit on unbound variables (some builds use set -u)
+set +u
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/logger.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/device.sh"
 
 flash_device() {
+    # Set default values for variables that might be undefined
+    FULL_VERIFY=${FULL_VERIFY:-0}
+    PAGE_SIZE=${PAGE_SIZE:-2048}
+    PAGE_SIZE_OVERRIDE=${PAGE_SIZE_OVERRIDE:-}
+    
     log_step "Flashing SD card"
     start_progress "flash" 100
     
@@ -97,45 +104,140 @@ flash_kernel() {
         log_info "Using default boot image"
     fi
     
-    # Validate pagesize
-    if command -v abootimg >/dev/null 2>&1; then
-        log_info "Verifying boot image pagesize..."
-        local pagesize=$(abootimg -i "$boot_image" 2>/dev/null | grep -oP 'Page size: \K[0-9]+')
-        if [[ "$pagesize" != "2048" ]]; then
-            log_warn "Boot image has incorrect page size: $pagesize (should be 2048)"
-            log_info "Attempting to recreate boot image with correct pagesize..."
-            
-            # Extract components
-            local tmp_dir="/tmp/rg35xx_boot_fix"
-            mkdir -p "$tmp_dir"
-            abootimg -x "$boot_image" "$tmp_dir"
-            
-            # Recreate with correct pagesize
-            abootimg --create "$boot_image.fixed" \
-                -f "$tmp_dir/bootimg.cfg" \
-                -k "$tmp_dir/zImage" \
-                -r "$tmp_dir/initrd.img" \
-                --pagesize 2048
-                
-            # Replace original
-            mv "$boot_image.fixed" "$boot_image"
-            rm -rf "$tmp_dir"
+    # If boot-new.img also doesn't exist, try to create it
+    if [[ ! -f "$boot_image" ]]; then
+        log_warn "Boot image not found: $boot_image"
+        log_info "Attempting to create boot image..."
+        
+        # Try to run the boot image fix script
+        if [[ -f "$SCRIPT_DIR/fix_boot_image.sh" ]]; then
+            log_info "Running boot image creation script..."
+            "$SCRIPT_DIR/fix_boot_image.sh" || {
+                log_error "Failed to create boot image"
+                return 1
+            }
+        else
+            log_error "Boot image fix script not found and no boot image available"
+            return 1
+        fi
+        
+        # Check if boot image was created
+        if [[ ! -f "$boot_image" ]]; then
+            log_error "Boot image still not available after creation attempt"
+            return 1
         fi
     fi
     
+    # Validate pagesize
+    if command -v abootimg >/dev/null 2>&1; then
+        log_info "Verifying boot image pagesize..."
+        local pagesize=$(abootimg -i "$boot_image" 2>/dev/null | grep -E "Page size|page size" | awk '{print $NF}' | tr -d ':')
+        if [[ -z "$pagesize" ]]; then
+            log_warn "Could not detect boot image page size - attempting extraction verification"
+            pagesize="unknown"
+        fi
+        log_info "Detected boot image page size: ${pagesize}"
+        if [[ "$pagesize" != "2048" ]] && [[ "$pagesize" != "unknown" ]]; then
+            log_warn "Boot image has incorrect page size: $pagesize (should be 2048)"
+            log_info "Attempting to recreate boot image with correct pagesize..."
+            
+            # Extract components to temporary directory
+            local tmp_dir="/tmp/rg35xx_boot_fix"
+            mkdir -p "$tmp_dir"
+            
+            if abootimg -x "$boot_image" "$tmp_dir/bootimg.cfg" "$tmp_dir/zImage" "$tmp_dir/initrd.img" 2>/dev/null; then
+                # Update config file to use correct page size
+                sed -i "s/pagesize .*/pagesize = 0x800/" "$tmp_dir/bootimg.cfg"
+                
+                # Recreate with correct pagesize
+                abootimg --create "$boot_image.fixed" \
+                    -f "$tmp_dir/bootimg.cfg" \
+                    -k "$tmp_dir/zImage" \
+                    -r "$tmp_dir/initrd.img" || {
+                    log_error "Failed to recreate boot image"
+                    rm -rf "$tmp_dir"
+                    return 1
+                }
+                
+                # Replace original
+                mv "$boot_image.fixed" "$boot_image"
+                log_success "Boot image recreated with correct page size"
+            else
+                log_error "Failed to extract boot image components"
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            
+            # Clean up temporary directory
+            rm -rf "$tmp_dir"
+        else
+            log_success "Boot image has correct page size: $pagesize"
+        fi
+    fi
+    
+    # Pre-flash verification setup
+    local src_hash pre_full pre_partial
+    if command -v sha256sum >/dev/null 2>&1; then
+        src_hash=$(sha256sum "$boot_image" | awk '{print $1}')
+        log_info "Source boot image SHA256: $src_hash"
+        
+        # Pre-verification for comparison
+        if [[ ${FULL_VERIFY:-0} -eq 1 ]]; then
+            pre_full="$src_hash"
+        else
+            # Partial verification - first 1MB hash
+            dd if="$boot_image" bs=1M count=1 2>/dev/null | sha256sum | awk '{print $1}' > /tmp/pre_hash
+            pre_partial=$(cat /tmp/pre_hash)
+        fi
+    fi
+
     # Flash the boot image
-    dd_with_progress "$boot_image" "$BOOT_PART" "Writing boot image (pagesize 2048)"
-    
+    dd_with_progress "$boot_image" "$BOOT_PART" "Writing boot image (pagesize ${PAGE_SIZE_OVERRIDE:-$PAGE_SIZE})"
+
     log_success "Kernel flashed successfully"
-    
+
     # Verify after flash
     log_info "Verifying boot partition..."
     sync
     if command -v abootimg >/dev/null 2>&1; then
-        abootimg -i "$BOOT_PART" || log_warn "Boot image verification failed"
+        abootimg -i "$BOOT_PART" || log_warn "Boot image header verification failed"
     else
-        file -s "$BOOT_PART" | grep -q "Android bootimg" || log_warn "Boot image might not be valid"
+        file -s "$BOOT_PART" | grep -q "Android bootimg" || log_warn "Boot image magic not detected"
     fi
+    if [[ -n "$src_hash" ]]; then
+        local dst_tmp="/tmp/rg35haxx_postflash_boot.img"
+        dd if="$BOOT_PART" of="$dst_tmp" bs=4M count=16 status=none 2>/dev/null || true
+        local dst_hash=$(sha256sum "$dst_tmp" | awk '{print $1}')
+        rm -f "$dst_tmp"
+        if [[ "$src_hash" == "$dst_hash" ]]; then
+            log_success "Boot partition first-chunk hash matches source"
+        else
+            log_warn "Boot partition hash mismatch (first chunk). Full read skipped to save time."
+        fi
+    fi
+    if [[ ${FULL_VERIFY:-0} -eq 1 && -n $(command -v sha256sum) ]]; then
+        log_info "Full image verification enabled (may be slow)."
+        bootimg_full_hash "$BOOT_PART" > /tmp/post_full 2>/dev/null || dd if="$BOOT_PART" bs=4M 2>/dev/null | sha256sum | awk '{print $1}' > /tmp/post_full
+        local post_full=$(cat /tmp/post_full)
+        if [[ "${pre_full:-}" == "$post_full" && -n "${pre_full:-}" ]]; then
+            log_success "Full image verification PASSED (hash $post_full)"
+        else
+            log_warn "Full image verification mismatch. Expected: ${pre_full:-none} Got: $post_full"
+        fi
+    else
+        log_info "Kernel image written. Performing partial verification (first 1MB hash)."
+        dd if="$BOOT_PART" bs=1M count=1 2>/dev/null | sha256sum | awk '{print $1}' > /tmp/post_hash
+        local post_partial=$(cat /tmp/post_hash)
+        if [[ "${pre_partial:-}" == "$post_partial" ]]; then
+            log_success "Partial verification PASSED (first 1MB hash matches)."
+        else
+            log_warn "Partial verification mismatch. (expected ${pre_partial:-none} got $post_partial)"
+        fi
+    fi
+    
+    # Clean up any temporary files
+    log_info "Cleaning up temporary directory..."
+    rm -f /tmp/post_full /tmp/post_hash /tmp/rg35haxx_postflash_boot.img 2>/dev/null || true
 }
 
 flash_rootfs() {
