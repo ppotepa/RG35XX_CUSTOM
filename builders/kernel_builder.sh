@@ -81,23 +81,43 @@ configure_kernel() {
 }
 
 apply_custom_config() {
-    if [[ ! -f "$SCRIPT_DIR/config_patch" ]]; then
-        warn "No config_patch found, using default configuration"
+    # Check for config_patch in multiple locations with priority for current working directory
+    local patch_file=""
+    local patch_dir=""
+    
+    # First check current working directory
+    if [[ -f "$PWD/config_patch" ]]; then
+        log_info "Using config_patch from current directory: $PWD"
+        patch_file="$PWD/config_patch"
+    elif [[ -d "$PWD/config_patch" ]]; then
+        log_info "Using config_patch directory from current directory: $PWD"
+        patch_dir="$PWD/config_patch"
+    # Then check script directory
+    elif [[ -f "$SCRIPT_DIR/config_patch" ]]; then
+        log_info "Using config_patch from script directory"
+        patch_file="$SCRIPT_DIR/config_patch"
+    elif [[ -d "$SCRIPT_DIR/config_patch" ]]; then
+        log_info "Using config_patch directory from script directory"
+        patch_dir="$SCRIPT_DIR/config_patch"
+    else
+        log_warn "No config_patch found, using default configuration"
         return
     fi
-
-    log "Applying custom configuration..."
-    local temp_config="/tmp/rg35xx_config_$$"
     
-    # Clean and convert config_patch
-    sed 's/\r$//' "$SCRIPT_DIR/config_patch" | \
-    grep -E '^CONFIG_[A-Z0-9_]+=' > "$temp_config"
+    log_info "Applying custom configuration..."
     
-    if scripts/kconfig/merge_config.sh .config "$temp_config"; then
-        log "Configuration merged successfully"
+    # Use proper merge_config.sh for best compatibility
+    if [[ -n "$patch_dir" ]]; then
+        # Apply all configs from directory
+        log_info "Merging configs from directory: $patch_dir"
+        ./scripts/kconfig/merge_config.sh -m .config "$patch_dir"/*.config
+    elif [[ -n "$patch_file" ]]; then
+        # Apply single config file
+        log_info "Merging config from file: $patch_file"
+        ./scripts/kconfig/merge_config.sh -m .config "$patch_file"
     else
-        warn "merge_config.sh failed, trying fallback method..."
-        apply_config_fallback "$temp_config"
+        log_warn "No config patch applied - using default config"
+    fi
     fi
     
     rm -f "$temp_config"
