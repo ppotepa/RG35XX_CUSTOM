@@ -1,10 +1,36 @@
 #!/bin/bash
 # Device detection and SD card management
 
+ # Guard against multiple sourcing
+ [[ -n "${RG35HAXX_DEVICE_LOADED:-}" ]] && return 0
+ export RG35HAXX_DEVICE_LOADED=1
+
+source "$(dirname "${BASH_SOURCE[0]}")/../config/constants.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
 
+detect_device() {
+    log_step "Detecting device type"
+    log_info "Target device: RG35HAXX (Anbernic RG35XX-H)"
+    log_info "Architecture: ARM64 (Allwinner H700)"
+    log_info "Device tree: ${DEVICE_DTB}"
+}
+
+configure_device_specific_settings() {
+    log_step "Configuring device-specific settings"
+    
+    # Set device-specific environment variables
+    export DEVICE_TYPE="RG35HAXX"
+    export DISPLAY_ORIENTATION="landscape"
+    export AUDIO_DRIVER="sun4i-i2s"
+    export INPUT_DEVICES="gpio-keys,sun4i-ts"
+    
+    log_info "Device configuration completed for $DEVICE_TYPE"
+}
+
+readonly RG35HAXX_DEVICE_LOADED=1
+
 detect_sd_card() {
-    step "Detecting RG35XX_H SD card"
+    log_step "Detecting RG35XX_H SD card"
     
     local target_disk=""
     while IFS= read -r disk; do
@@ -17,28 +43,20 @@ detect_sd_card() {
         fi
     done < <(lsblk -dn -o NAME,TYPE,RM | awk '$2=="disk" && $3=="1" {print "/dev/"$1}')
     
-    [[ -n "$target_disk" ]] || error "No RG35XX_H SD card found. Insert SD card and try again."
-    
-    readonly TARGET_DISK="$target_disk"
-    readonly BOOT_PART=$(lsblk -nr -o NAME,PARTLABEL "$TARGET_DISK" | awk '$2=="boot"{print "/dev/"$1}' | head -1)
-    readonly ROOT_PART=$(lsblk -nr -o NAME,PARTLABEL "$TARGET_DISK" | awk '$2=="rootfs"{print "/dev/"$1}' | head -1)
-    
-    log "Target disk: $TARGET_DISK"
-    log "Boot partition: $BOOT_PART"
-    log "Root partition: $ROOT_PART"
-    
-    confirm_flash_operation
-}
-
-confirm_flash_operation() {
-    if [[ "${INTERACTIVE:-0}" == "1" ]]; then
-        echo -e "\n${RED}WARNING: This will OVERWRITE the SD card!${NC}"
-        read -p "Type 'YES' to continue: " confirm
-        [[ "$confirm" == "YES" ]] || error "Aborted by user"
-    else
-        warn "Auto-flashing mode: SD card will be overwritten in 3 seconds..."
-        sleep 3
+    if [[ -z "$target_disk" ]]; then
+        log_warn "No RG35XX_H SD card found. Insert SD card to enable flashing."
+        return 1
     fi
+    
+    export TARGET_DISK="$target_disk"
+    export BOOT_PART=$(lsblk -nr -o NAME,PARTLABEL "$TARGET_DISK" | awk '$2=="boot"{print "/dev/"$1}' | head -1)
+    export ROOT_PART=$(lsblk -nr -o NAME,PARTLABEL "$TARGET_DISK" | awk '$2=="rootfs"{print "/dev/"$1}' | head -1)
+    
+    log_info "Target disk: $TARGET_DISK"
+    log_info "Boot partition: $BOOT_PART"
+    log_info "Root partition: $ROOT_PART"
+    
+    return 0
 }
 
 dd_with_progress() {
@@ -48,14 +66,15 @@ dd_with_progress() {
     
     local size=$(stat -c%s "$input" 2>/dev/null || echo "0")
     local size_mb=$((size / 1024 / 1024))
+    local size_human=$(numfmt --to=iec "$size" 2>/dev/null || echo "${size_mb}MB")
     
     if [ $size_mb -eq 0 ]; then
-        log "$description (unknown size)..."
+        log_info "$description (unknown size)..."
         dd if="$input" of="$output" bs=1M conv=fsync status=progress 2>/dev/null
         return
     fi
     
-    log "$description (${size_mb}MB)..."
+    log_info "$description ($size_human)..."
     
     if command -v pv >/dev/null 2>&1; then
         pv -p -t -e -r -b "$input" | dd of="$output" bs=1M conv=fsync 2>/dev/null
@@ -64,5 +83,5 @@ dd_with_progress() {
     fi
     
     sync
-    log "$description completed"
+    log_success "$description completed ($size_human)"
 }

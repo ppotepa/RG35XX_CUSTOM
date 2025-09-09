@@ -18,20 +18,23 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-echo "=== RG35XX_H Builder - Ubuntu Runner ==="
+echo "=== RG35HAXX Builder - Ubuntu Runner ==="
 echo "Working directory: $SCRIPT_DIR"
 echo
 
-# Fix line endings for all script files
-echo "Fixing line endings..."
-find "$SCRIPT_DIR" -name "*.sh" -exec sed -i 's/\r$//' {} \;
-find "$SCRIPT_DIR" -name "*config*" -exec sed -i 's/\r$//' {} \; 2>/dev/null || true
+# CRITICAL: Fix line endings for ALL files first
+echo "Fixing line endings for all files..."
+find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "build*" -o -name "*config*" \) -exec dos2unix {} \; 2>/dev/null || {
+    echo "dos2unix not found, using sed fallback..."
+    find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "build*" -o -name "*config*" \) -exec sed -i 's/\r$//' {} \;
+}
 
-# Make scripts executable
-chmod +x "$SCRIPT_DIR"/*.sh 2>/dev/null || true
+# Make ALL scripts executable
+echo "Setting executable permissions..."
+find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "build*" \) -exec chmod +x {} \;
 
-echo "Starting build process..."
+echo "Starting RG35HAXX modular build process..."
 echo
 
-# Execute main build script
-exec "$SCRIPT_DIR/build_rg35xx.sh" "$@"
+# Execute modular build script
+exec "$SCRIPT_DIR/build.sh" "$@"

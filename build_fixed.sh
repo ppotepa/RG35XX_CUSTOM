@@ -19,15 +19,12 @@ Options:
   --force-build     Force rebuild even if output exists
   --skip-sd-check   Skip SD card validation at startup
   --skip-backup     Skip SD card backup before flashing (faster)
-  --dtb=N           Select DTB variant (0=rg35xx-h, 1=rg35xx-h-rev6, 2=rg40xx-h)
-  --package=MODE    Boot image packaging mode (catdt or with-dt)
   --help, -h        Show this help message
 
 Examples:
   sudo ./run_ubuntu.sh                           # Full build with SD validation
   sudo ./run_ubuntu.sh --skip-build             # Flash existing build (with backup)
   sudo ./run_ubuntu.sh --skip-build --skip-backup  # Fast flash existing build
-  sudo ./run_ubuntu.sh --dtb=1 --package=with-dt   # Try alternate DTB and packaging mode
   sudo ./run_ubuntu.sh --skip-sd-check          # Build without requiring SD card
   sudo ./run_ubuntu.sh --force-build            # Force complete rebuild
 EOF
@@ -38,8 +35,6 @@ SKIP_BUILD=false
 FORCE_BUILD=false
 SKIP_SD_CHECK=false
 SKIP_BACKUP=false
-DTB_INDEX=0
-PACKAGE_MODE="catdt"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -59,22 +54,6 @@ while [[ $# -gt 0 ]]; do
             SKIP_BACKUP=true
             shift
             ;;
-        --dtb=*)
-            DTB_INDEX="${1#*=}"
-            if ! [[ "$DTB_INDEX" =~ ^[0-2]$ ]]; then
-                echo "ERROR: DTB index must be 0, 1, or 2" >&2
-                exit 1
-            fi
-            shift
-            ;;
-        --package=*)
-            PACKAGE_MODE="${1#*=}"
-            if [[ "$PACKAGE_MODE" != "catdt" && "$PACKAGE_MODE" != "with-dt" ]]; then
-                echo "ERROR: Package mode must be 'catdt' or 'with-dt'" >&2
-                exit 1
-            fi
-            shift
-            ;;
         --help|-h)
             show_early_help
             exit 0
@@ -91,7 +70,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-export SKIP_BUILD FORCE_BUILD SKIP_SD_CHECK SKIP_BACKUP DTB_INDEX PACKAGE_MODE
+export SKIP_BUILD FORCE_BUILD SKIP_SD_CHECK SKIP_BACKUP
 
 # Now source all modules safely
 echo "Loading configuration..."
@@ -116,11 +95,10 @@ source "$SCRIPT_DIR/flash/flasher.sh" || { echo "ERROR: Failed to load flasher";
 trap 'cleanup' EXIT
 
 cleanup() {
-    if [[ -d "${TEMP_BUILD_DIR:-}" ]]; then
-        log_info "Cleaning up temporary directory..."
-        rm -rf "$TEMP_BUILD_DIR"
+    if [[ -d "${BUILD_DIR:-}" ]]; then
+        log_info "Cleaning up build directory..."
+        rm -rf "$BUILD_DIR"
     fi
-    # Note: We keep the main build directory since it's in the project folder
 }
 
 show_header() {
@@ -181,34 +159,6 @@ validate_sd_card_early() {
     log_info "Root partition: $ROOT_PART"
 }
 
-# Create a minimal rootfs when we have an existing kernel but no rootfs
-create_minimal_rootfs() {
-    log_step "Creating minimal rootfs from existing kernel"
-    start_progress "rootfs" 100
-    
-    # Copy existing kernel
-    update_progress 10 "Preparing build environment..."
-    mkdir -p "$TEMP_BUILD_DIR/out" || { log_error "Failed to create temp directory"; return 1; }
-    cp "$OUTPUT_DIR/zImage-dtb" "$TEMP_BUILD_DIR/out/" || { log_error "Failed to copy kernel image"; return 1; }
-    
-    # Create minimal rootfs with busybox
-    update_progress 30 "Getting BusyBox source..."
-    if [[ ! -d "$SCRIPT_DIR/busybox" ]]; then
-        get_busybox_source || { log_error "Failed to get BusyBox source"; end_progress "Failed"; return 1; }
-        update_progress 50 "Configuring BusyBox..."
-        configure_busybox || { log_error "Failed to configure BusyBox"; end_progress "Failed"; return 1; }
-        update_progress 60 "Building BusyBox..."
-        build_busybox || { log_error "Failed to build BusyBox"; end_progress "Failed"; return 1; }
-    fi
-    
-    update_progress 80 "Creating rootfs..."
-    create_rootfs || { log_error "Failed to create rootfs"; end_progress "Failed"; return 1; }
-    update_progress 100 "Rootfs created"
-    
-    end_progress "✅ Created minimal rootfs from existing kernel"
-    return 0
-}
-
 main() {
     show_header
     
@@ -218,12 +168,6 @@ main() {
     log_info "Build mode: $([ "$SKIP_BUILD" == "true" ] && echo "FLASH-ONLY" || echo "FULL-BUILD")"
     log_info "Force rebuild: $([ "$FORCE_BUILD" == "true" ] && echo "YES" || echo "NO")"
     log_info "SD validation: $([ "$SKIP_SD_CHECK" == "true" ] && echo "SKIPPED" || echo "REQUIRED")"
-    log_info "Backup mode: $([ "$SKIP_BACKUP" == "true" ] && echo "SKIPPED" || echo "ENABLED")"
-    
-    # Set active DTB from index
-    ACTIVE_DTB="${DTB_VARIANTS[$DTB_INDEX]}"
-    log_info "DTB variant: $ACTIVE_DTB (index: $DTB_INDEX)"
-    log_info "Packaging mode: $PACKAGE_MODE"
     log_info "Backup mode: $([ "$SKIP_BACKUP" == "true" ] && echo "SKIPPED" || echo "ENABLED")"
     echo
     
@@ -243,44 +187,24 @@ main() {
     if [[ "$SKIP_BUILD" == "true" ]]; then
         log_step "Skipping build phase (--skip-build specified)"
         
-        # Check for minimum required files
-        if [[ -f "$OUTPUT_DIR/zImage-dtb" ]]; then
-            KERNEL_FOUND=true
-            log_success "✅ Found kernel image ($(du -h "$OUTPUT_DIR/zImage-dtb" | cut -f1))"
-        else
-            KERNEL_FOUND=false
-            log_warn "⚠️ Kernel image not found!"
-        fi
-        
-        if [[ -f "$OUTPUT_DIR/rootfs.tar.gz" ]]; then
-            ROOTFS_FOUND=true
-            log_success "✅ Found rootfs ($(du -h "$OUTPUT_DIR/rootfs.tar.gz" | cut -f1))"
-        else
-            ROOTFS_FOUND=false
-            log_warn "⚠️ Rootfs archive not found - will build minimal rootfs"
-        fi
-        
-        # Allow partial skip if at least kernel is found
-        if [[ "$KERNEL_FOUND" == "true" ]]; then
-            # Create minimal rootfs if needed
-            if [[ "$ROOTFS_FOUND" == "false" ]]; then
-                log_info "Creating minimal rootfs using existing kernel..."
-                # Build minimal rootfs with existing kernel
-                mkdir -p "$TEMP_BUILD_DIR"
-                create_minimal_rootfs || { log_error "Failed to create minimal rootfs"; exit 1; }
-            fi
-        else
-            log_error "Cannot skip build - no usable kernel image found!"
-            log_info "Available files in $OUTPUT_DIR:"
+        # Check if persistent build outputs exist
+        if [[ ! -f "$OUTPUT_DIR/zImage-dtb" ]] || [[ ! -f "$OUTPUT_DIR/rootfs.tar.gz" ]]; then
+            log_error "Build outputs not found in $OUTPUT_DIR!"
+            log_info "Available files:"
             ls -la "$OUTPUT_DIR/" 2>/dev/null || log_info "  (output directory doesn't exist)"
             log_info "Run without --skip-build to create the files first."
             exit 1
         fi
         
+        log_success "Using existing build outputs:"
+        log_info "  Kernel: $OUTPUT_DIR/zImage-dtb ($(stat -c%s "$OUTPUT_DIR/zImage-dtb" | numfmt --to=iec))"
+        log_info "  RootFS: $OUTPUT_DIR/rootfs.tar.gz ($(stat -c%s "$OUTPUT_DIR/rootfs.tar.gz" | numfmt --to=iec))"
+        
         # Copy outputs to temp build directory for flashing
         setup_build_environment
-        # Files are already in OUTPUT_DIR, no need to copy
-        log_info "Build outputs ready for flashing"
+        cp "$OUTPUT_DIR/zImage-dtb" "$BUILD_DIR/out/"
+        cp "$OUTPUT_DIR/rootfs.tar.gz" "$BUILD_DIR/out/"
+        log_info "Copied outputs to build directory for flashing"
     else
         # Full build process
         log_step "Starting full build process"
@@ -298,68 +222,48 @@ main() {
             fi
             # Copy existing files to build directory
             setup_build_environment
-            # Files are already in OUTPUT_DIR, no need to copy
+            cp "$OUTPUT_DIR/zImage-dtb" "$BUILD_DIR/out/"
+            cp "$OUTPUT_DIR/rootfs.tar.gz" "$BUILD_DIR/out/"
             log_info "Using existing build outputs"
         else
             # Setup build environment
             setup_build_environment
             
-            # Initialize overall progress tracking
-            log_step "Starting RG35HAXX build process"
-            start_progress "overall" 100
-            
             # Build process
             log_step "Building Linux kernel"
-            update_progress 10 "Getting Linux kernel source..."
             get_linux_source || { log_error "Failed to get Linux source"; exit 1; }
-            update_progress 15 "Configuring kernel..."
             configure_kernel || { log_error "Failed to configure kernel"; exit 1; }
             
             # Apply LCD console bootargs
             source "$SCRIPT_DIR/builders/bootarg_modifier.sh"
-            update_progress 20 "Modifying bootargs..."
             modify_bootargs || { log_error "Failed to modify bootargs"; exit 1; }
             
-            update_progress 25 "Building kernel..."
             build_kernel || { log_error "Failed to build kernel"; exit 1; }
-            update_progress 40 "Kernel build complete"
             log_success "✅ Kernel build completed successfully"
             
             log_step "Building BusyBox userspace"
-            update_progress 45 "Getting BusyBox source..."
             get_busybox_source || { log_error "Failed to get BusyBox source"; exit 1; }
-            update_progress 50 "Configuring BusyBox..."
             configure_busybox || { log_error "Failed to configure BusyBox"; exit 1; }
-            update_progress 55 "Building BusyBox..."
             build_busybox || { log_error "Failed to build BusyBox"; exit 1; }
-            update_progress 65 "BusyBox build complete"
             log_success "✅ BusyBox build completed successfully"
             
             log_step "Creating root filesystem"
-            update_progress 70 "Creating rootfs..."
             create_rootfs || { log_error "Failed to create rootfs"; exit 1; }
-            update_progress 80 "Root filesystem created"
             log_success "✅ Root filesystem created successfully"
             
             # Save outputs to persistent directory
             log_step "Saving build outputs"
-            update_progress 85 "Saving build outputs..."
-            # Outputs are already saved directly to OUTPUT_DIR during build
-            update_progress 90 "Build outputs saved"
-            log_success "Build outputs available in $OUTPUT_DIR"
-            
-            end_progress "Build completed successfully"
+            mkdir -p "$OUTPUT_DIR"
+            cp "$BUILD_DIR/out/zImage-dtb" "$OUTPUT_DIR/"
+            cp "$BUILD_DIR/out/rootfs.tar.gz" "$OUTPUT_DIR/"
+            log_success "Build outputs saved to $OUTPUT_DIR"
         fi
     fi
     
     # Flash to device
     if [[ "$SKIP_SD_CHECK" == "false" ]]; then
         log_step "Flashing to SD card"
-        start_progress "overall" 100
-        update_progress 95 "Flashing to SD card..."
         flash_device
-        update_progress 100 "Flash complete"
-        end_progress "All operations completed"
     else
         log_warn "SD card validation was skipped - manual flashing required"
         log_info "Build outputs available at:"
