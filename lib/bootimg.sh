@@ -195,9 +195,9 @@ create_boot_image_from_components() {
     
     # Try mkbootimg first
     if command -v mkbootimg >/dev/null 2>&1; then
-        local mkbootimg_cmd="mkbootimg --kernel $kernel_file --ramdisk $ramdisk_file --pagesize $BOOT_IMAGE_PAGE_SIZE"
+    local mkbootimg_cmd="mkbootimg --kernel $kernel_file --ramdisk $ramdisk_file --pagesize $BOOT_IMAGE_PAGE_SIZE"
         mkbootimg_cmd="$mkbootimg_cmd --base 0x40000000 --kernel_offset 0x00080000 --ramdisk_offset 0x04000000"
-        mkbootimg_cmd="$mkbootimg_cmd --tags_offset 0x0e000000 --cmdline 'console=ttyS0,115200 console=tty0 rw rootwait'"
+    mkbootimg_cmd="$mkbootimg_cmd --tags_offset 0x0e000000 --cmdline '${CUSTOM_CMDLINE:-$DEFAULT_CMDLINE}'"
         [[ -f "$dtb_file" ]] && mkbootimg_cmd="$mkbootimg_cmd --dt $dtb_file"
         mkbootimg_cmd="$mkbootimg_cmd --output $output_image"
         
@@ -215,7 +215,7 @@ create_boot_image_from_components() {
     # Try abootimg
     if command -v abootimg >/dev/null 2>&1; then
         local config_file=$(mktemp)
-        cat > "$config_file" << EOF
+    cat > "$config_file" << EOF
 bootsize = 0x2000000
 pagesize = 0x$(printf '%x' $BOOT_IMAGE_PAGE_SIZE)
 kerneladdr = 0x40080000
@@ -223,7 +223,7 @@ ramdiskaddr = 0x44000000
 secondaddr = 0x40f00000
 tagsaddr = 0x4e000000
 name = RG35XX_H Custom
-cmdline = console=ttyS0,115200 console=tty0 rw rootwait
+cmdline = ${CUSTOM_CMDLINE:-$DEFAULT_CMDLINE}
 EOF
         
         abootimg --create "$output_image" -f "$config_file" -k "$kernel_file" -r "$ramdisk_file" || {

@@ -3,6 +3,37 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib/logger.sh"
 
+has_apt_candidate() {
+    local pkg="$1"
+    apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}' | grep -vq '(none)'
+}
+
+ensure_local_mkbootimg_with_venv() {
+    # Create local venv and install mkbootimg, then symlink to /usr/local/bin
+    local venv_dir="$SCRIPT_DIR/.venv-tools"
+    if [[ ! -d "$venv_dir" ]]; then
+        log_info "Creating local Python venv for mkbootimg..."
+        apt-get install -y python3-venv || {
+            log_warn "python3-venv not available; cannot create local venv"
+            return 1
+        }
+        python3 -m venv "$venv_dir" || return 1
+    fi
+    log_info "Installing mkbootimg into local venv..."
+    "$venv_dir/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
+    "$venv_dir/bin/pip" install mkbootimg || {
+        log_warn "Failed to install mkbootimg into venv"
+        return 1
+    }
+    # Expose mkbootimg globally for this host
+    if [[ -x "$venv_dir/bin/mkbootimg" ]]; then
+        ln -sf "$venv_dir/bin/mkbootimg" /usr/local/bin/mkbootimg 2>/dev/null || true
+        log_success "mkbootimg available via local venv"
+        return 0
+    fi
+    return 1
+}
+
 install_build_dependencies() {
     log_info "Installing build dependencies..."
     
@@ -60,18 +91,50 @@ install_build_dependencies() {
         rm -rf /tmp/abootimg
     fi
     
-    # Try android-tools as secondary option (but it may have gki module issues)
-    if ! command -v abootimg >/dev/null 2>&1; then
-        log_info "Trying android-tools-mkbootimg as fallback..."
-        apt-get install -y android-tools-mkbootimg android-tools-fsutils || {
-            log_warn "Android tools package installation failed"
-            
-            # Try pip installation as last resort
-            log_info "Trying pip3 mkbootimg installation..."
-            pip3 install mkbootimg || {
-                log_warn "pip3 mkbootimg installation also failed"
-            }
-        }
+    # Try mkbootimg as secondary option
+    if ! command -v mkbootimg >/dev/null 2>&1; then
+        log_info "Checking mkbootimg apt packages availability..."
+        local tried_pkg=0
+        if has_apt_candidate android-tools-mkbootimg; then
+            apt-get install -y android-tools-mkbootimg && tried_pkg=1 || log_warn "Failed to install android-tools-mkbootimg"
+        else
+            log_warn "Package 'android-tools-mkbootimg' has no installation candidate"
+        fi
+        if has_apt_candidate android-tools-fsutils; then
+            apt-get install -y android-tools-fsutils || log_warn "Failed to install android-tools-fsutils"
+        else
+            log_warn "Package 'android-tools-fsutils' has no installation candidate"
+        fi
+
+        # If still no mkbootimg, try pipx then venv
+        if ! command -v mkbootimg >/dev/null 2>&1; then
+            log_info "Attempting mkbootimg installation via pipx (preferred for PEP 668)..."
+            if has_apt_candidate pipx; then
+                apt-get install -y pipx || log_warn "pipx installation failed"
+            else
+                apt-get install -y pipx || true
+            fi
+            if command -v pipx >/dev/null 2>&1; then
+                pipx install mkbootimg || log_warn "pipx mkbootimg install failed"
+                # pipx installs to ~/.local/bin
+                if [[ -x "/root/.local/bin/mkbootimg" ]]; then
+                    ln -sf "/root/.local/bin/mkbootimg" /usr/local/bin/mkbootimg 2>/dev/null || true
+                fi
+            fi
+        fi
+
+        # Venv fallback for externally-managed environment
+        if ! command -v mkbootimg >/dev/null 2>&1; then
+            log_info "pip is externally-managed; creating local venv for mkbootimg..."
+            ensure_local_mkbootimg_with_venv || log_warn "Local venv installation failed"
+        fi
+
+        if ! command -v mkbootimg >/dev/null 2>&1; then
+            log_warn "mkbootimg is still unavailable. We'll rely on abootimg path."
+            log_warn "If you need mkbootimg, enable appropriate apt repos or use a venv."
+        else
+            log_success "mkbootimg is available"
+        fi
     fi
     
     # Verify critical tools
@@ -99,7 +162,14 @@ install_build_dependencies() {
     fi
     
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
-        log_error "Missing critical tools: ${missing_tools[*]}"
+    log_error "Missing critical tools: ${missing_tools[*]}"
+    echo "Tips:"
+    echo "  - Prefer 'abootimg' (apt install abootimg)"
+    echo "  - If 'android-tools-mkbootimg' has no candidate, use a local venv:"
+    echo "      sudo apt-get install -y python3-venv && \"
+    echo "      python3 -m venv $SCRIPT_DIR/.venv-tools && \"
+    echo "      $SCRIPT_DIR/.venv-tools/bin/pip install mkbootimg && \"
+    echo "      ln -s $SCRIPT_DIR/.venv-tools/bin/mkbootimg /usr/local/bin/mkbootimg"
         return 1
     fi
     

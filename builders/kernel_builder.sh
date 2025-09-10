@@ -80,6 +80,7 @@ configure_kernel() {
         cmdline_value="$DEFAULT_CMDLINE"
     fi
     log_info "Applying kernel cmdline: $cmdline_value"
+    sed -i '/^CONFIG_CMDLINE=/d' .config || true
     echo "CONFIG_CMDLINE=\"$cmdline_value\"" >> .config
     echo "CONFIG_CMDLINE_BOOL=y" >> .config
     if [[ "${NO_FORCE_CMDLINE:-false}" == "false" ]]; then
@@ -181,12 +182,47 @@ build_kernel() {
     log_success "Device trees build completed"
     
     update_progress 60 "Building kernel modules..."
-    make -j"$BUILD_JOBS" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" modules 2>&1 | \
-    while IFS= read -r line; do
-        if [[ "$line" =~ LD[[:space:]]+\[M\][[:space:]]+([^[:space:]]+) ]]; then
-            if ((RANDOM % 10 == 0)); then
-                update_progress $((60 + RANDOM % 20)) "Building module... $(basename "${BASH_REMATCH[1]}")"
+    # Monotonic, weighted progress: estimate work by SLOC in major module trees
+    local PROG_BASE=60 PROG_END=85 PROG_RANGE=$((PROG_END-PROG_BASE))
+    declare -A UNIT_WEIGHT
+    declare -A SEEN_UNIT
+    local TOTAL_WEIGHT=0 ACC_WEIGHT=0 CUR_PROG=$PROG_BASE
+    # Pre-compute weights by counting lines in .c files (fallback weight=1)
+    while IFS= read -r -d '' src; do
+        local lines
+        lines=$(wc -l < "$src" 2>/dev/null || echo 0)
+        [[ "$lines" =~ ^[0-9]+$ ]] || lines=0
+        (( lines == 0 )) && lines=1
+        UNIT_WEIGHT["$src"]=$lines
+        TOTAL_WEIGHT=$((TOTAL_WEIGHT+lines))
+    done < <(find drivers fs sound net crypto -type f -name '*.c' -print0 2>/dev/null)
+    log_info "Module weighting total SLOC: $TOTAL_WEIGHT"
+
+    # Build and update progress based on compiled objects observed in output
+    make -j"$BUILD_JOBS" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" modules 2>&1 | while IFS= read -r line; do
+        if [[ "$line" =~ (CC|CXX|LD|AR)[[:space:]]+([^[:space:]]+\.o) ]]; then
+            obj="${BASH_REMATCH[2]}"
+            # Normalize obj path (strip leading ./)
+            [[ "$obj" == ./* ]] && obj="${obj:2}"
+            src="${obj%.o}.c"
+            weight="${UNIT_WEIGHT[$src]}"
+            [[ -z "$weight" ]] && weight=1
+            if [[ -z "${SEEN_UNIT[$src]}" ]]; then
+                SEEN_UNIT["$src"]=1
+                ACC_WEIGHT=$((ACC_WEIGHT+weight))
+                if (( TOTAL_WEIGHT > 0 )); then
+                    local target=$(( PROG_BASE + (ACC_WEIGHT * PROG_RANGE) / TOTAL_WEIGHT ))
+                    if (( target > CUR_PROG )); then
+                        CUR_PROG=$target
+                        local pct=$(( (ACC_WEIGHT * 100) / (TOTAL_WEIGHT>0?TOTAL_WEIGHT:1) ))
+                        update_progress "$CUR_PROG" "Compiling modules... ${pct}% ($(basename "${obj}"))"
+                    fi
+                fi
             fi
+        fi
+        # Light feedback on module linking without affecting progress
+        if [[ "$line" =~ ^LD\ \[M\]\ (.+) ]]; then
+            : # could log or keep silent to avoid jitter
         fi
     done
     log_success "Kernel modules build completed"
@@ -257,12 +293,38 @@ package_boot_images() {
             extract_ramdisk "$SCRIPT_DIR/backups/boot-p4-backup.img" "$ramdisk" || true
         fi
     fi
-    # Create minimal if still missing
+        # Create minimal if still missing
     if [[ ! -f "$ramdisk" ]]; then
-        log_warn "No stock ramdisk available; generating minimal placeholder"
-        local tmpdir=$(mktemp -d)
-        (cd "$tmpdir" && mkdir -p dev proc sys etc && echo '#!/bin/sh' > init && chmod +x init && find . | cpio -H newc -o | gzip > "$ramdisk")
-        rm -rf "$tmpdir"
+                log_warn "No stock ramdisk available; generating minimal switch_root initramfs"
+                local tmpdir=$(mktemp -d)
+                cat > "$tmpdir/init" << 'IRAM'
+#!/bin/sh
+exec >/dev/tty0 2>&1
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+echo "[initramfs] starting, cmdline: $(cat /proc/cmdline)"
+# find root
+ROOTDEV=""
+for c in /dev/disk/by-partlabel/rootfs /dev/mmcblk0p2 /dev/mmcblk1p2 /dev/mmcblk2p2; do
+    [ -e "$c" ] && { ROOTDEV="$c"; break; }
+done
+if [ -n "$ROOTDEV" ]; then
+    mkdir -p /newroot
+    mount "$ROOTDEV" /newroot || mount -t ext4 "$ROOTDEV" /newroot || echo "[initramfs] mount failed"
+    if [ -d /newroot ]; then
+        mount --move /dev /newroot/dev 2>/dev/null || true
+        mount --move /proc /newroot/proc 2>/dev/null || true
+        mount --move /sys /newroot/sys 2>/dev/null || true
+        exec switch_root /newroot /sbin/init || exec chroot /newroot /sbin/init || exec chroot /newroot /init
+    fi
+fi
+echo "[initramfs] dropping to shell"
+exec sh
+IRAM
+                chmod +x "$tmpdir/init"
+                (cd "$tmpdir" && mkdir -p dev proc sys etc && find . | cpio -H newc -o | gzip > "$ramdisk")
+                rm -rf "$tmpdir"
     fi
 
     # catdt mode (Image+DTB concatenation)
@@ -361,8 +423,7 @@ package_boot_images() {
 install_kernel_modules() {
     log_info "Installing kernel modules to output dir..."
     mkdir -p "$TEMP_BUILD_DIR/modules"
-    make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" 
-        INSTALL_MOD_PATH="$TEMP_BUILD_DIR/modules" modules_install > /dev/null 2>&1
+    make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" INSTALL_MOD_PATH="$TEMP_BUILD_DIR/modules" modules_install > /dev/null 2>&1
         
     # Package modules into rootfs for later installation
     cd "$TEMP_BUILD_DIR/modules"

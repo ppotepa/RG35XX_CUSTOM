@@ -267,6 +267,12 @@ copy_rootfs_files() {
     cd "$BUILD_DIR/rootfs"
     tar -cf - . | (cd "$mount_point" && tar -xf -)
     
+    # Install kernel modules if available
+    if [[ -f "$OUTPUT_DIR/modules.tar.gz" ]]; then
+        log_info "Installing kernel modules into rootfs..."
+        tar -xzf "$OUTPUT_DIR/modules.tar.gz" -C "$mount_point" || log_warn "Failed to extract modules archive"
+    fi
+    
     log_info "Setting up device nodes..."
     mknod "$mount_point/dev/console" c 5 1 2>/dev/null || true
     mknod "$mount_point/dev/null" c 1 3 2>/dev/null || true

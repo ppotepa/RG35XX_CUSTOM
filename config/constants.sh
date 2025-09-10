@@ -59,8 +59,11 @@ export DEVICE_DTS="sun50i-h700-anbernic-rg35xx-h.dts"
 
 # Boot image defaults
 export PAGE_SIZE="${PAGE_SIZE:-2048}"
-export DEFAULT_CMDLINE="console=tty0 loglevel=7 ignore_loglevel"
+# Default cmdline (Linux path). We avoid serial console (no UART) and rely on fbcon on tty0.
+# Builders/bootarg_modifier.sh will override via CUSTOM_CMDLINE at runtime.
+export DEFAULT_CMDLINE="console=tty0 loglevel=7 ignore_loglevel fbcon=map:1"
 export FORCE_CMDLINE="${FORCE_CMDLINE:-true}"   # can be toggled by --no-force-cmdline
+# CUSTOM_CMDLINE is constructed by bootarg_modifier.sh; allow env/CLI to override
 export CUSTOM_CMDLINE="${CUSTOM_CMDLINE:-$DEFAULT_CMDLINE}"  # override with --cmdline=
 
 # Legacy variable names for compatibility

@@ -370,14 +370,14 @@ main() {
             log_step "Building Linux kernel"
             update_progress 10 "Getting Linux kernel source..."
             get_linux_source || { log_error "Failed to get Linux source"; exit 1; }
-            update_progress 15 "Configuring kernel..."
-            configure_kernel || { log_error "Failed to configure kernel"; exit 1; }
-            
-            # Apply LCD console bootargs
+            # Compute LCD/HDMI console bootargs BEFORE configuring kernel so CONFIG_CMDLINE is correct
             source "$SCRIPT_DIR/builders/bootarg_modifier.sh"
-            update_progress 20 "Modifying bootargs..."
+            update_progress 15 "Preparing bootargs..."
             modify_bootargs || { log_error "Failed to modify bootargs"; exit 1; }
-            
+
+            update_progress 18 "Configuring kernel..."
+            configure_kernel || { log_error "Failed to configure kernel"; exit 1; }
+
             update_progress 25 "Building kernel..."
             build_kernel || { log_error "Failed to build kernel"; exit 1; }
             update_progress 40 "Kernel build complete"

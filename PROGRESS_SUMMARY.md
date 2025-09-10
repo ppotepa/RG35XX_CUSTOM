@@ -1,3 +1,19 @@
+Linux-only build path focus
+---------------------------
+
+- Build targets ARM64 (Allwinner H700) with DTBs: `sun50i-h700-anbernic-rg35xx-h*.dtb`.
+- Default kernel cmdline avoids UART and uses `console=tty0` with fbcon helpers.
+- Boot image page size enforced to 2048; both catdt and with-dt modes supported.
+- Initramfs now mounts `PARTLABEL=rootfs` and switch_root's to real rootfs; shows logs on `/dev/tty0`.
+- HDMI helper mode set: `video=HDMI-A-1:1280x720@60`; disable with `video=HDMI-A-1:D` if needed.
+
+Next operational steps
+----------------------
+
+- Build on Ubuntu: run `sudo ./run_ubuntu.sh` (or add `--skip-sd-check` to build without card).
+- Flash to SD using the integrated flasher when prompted.
+- First boot should display logs and an emergency BusyBox shell on LCD/HDMI.
+- If display stays black, try `--dtb=1` (rev6 panel) or set `--package=with-dt`.
 # RG35HAXX Custom Linux Builder - Progress Tracking & Speed Optimization Summary
 
 ## 🚀 What's Been Implemented

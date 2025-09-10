@@ -10,6 +10,14 @@ create_rootfs() {
     
     update_progress 20 "Creating directory structure..."
     create_directory_structure
+
+    update_progress 30 "Populating BusyBox..."
+    if [[ -d "$BUILD_DIR/busybox/_install" ]]; then
+        # Copy BusyBox runtime into rootfs
+        cp -a "$BUILD_DIR/busybox/_install/." .
+    else
+        log_warn "BusyBox _install not found; shell may be missing"
+    fi
     
     update_progress 40 "Creating init script..."
     create_init_script
@@ -29,44 +37,39 @@ create_rootfs() {
 
 create_directory_structure() {
     mkdir -p {dev,proc,sys,tmp,mnt,etc,var,run}
+    mkdir -p sbin bin usr/bin usr/sbin lib lib64
 }
 
 create_init_script() {
     cat > init << 'EOF'
 #!/bin/sh
+# Redirect stdout/stderr to console for visibility
+exec >/dev/tty0 2>&1
+
 # Mount essential filesystems
-mount -t proc none /proc
-mount -t sysfs none /sys
-mount -t devtmpfs none /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+echo "====================================="
+echo "  RG35HAXX Custom Linux (rootfs)     "
+echo "====================================="
+echo "[init] Kernel cmdline: $(cat /proc/cmdline)"
 
 # Configure framebuffer console
 echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null || true
-
-# Find the primary framebuffer
 for fb in /sys/class/graphics/fb*; do
-    if [ -e "$fb" ]; then
-        echo "Found framebuffer: $fb"
-        # Enable this framebuffer
-        echo 0 > $fb/blank 2>/dev/null || true
-        # Set reasonable resolution if needed
-        echo "U:1024x600p-60" > $fb/mode 2>/dev/null || true
-    fi
+    [ -e "$fb" ] || continue
+    echo 0 > "$fb/blank" 2>/dev/null || true
 done
-
-# Ensure correct console is active
 for con in /sys/class/vtconsole/vtcon*; do
-    if grep -q "frame buffer" $con/name 2>/dev/null; then
-        echo 1 > $con/bind
-        echo "Activated framebuffer console: $con"
+    if grep -q "frame buffer" "$con/name" 2>/dev/null; then
+        echo 1 > "$con/bind" 2>/dev/null || true
     fi
 done
 
-# Clear screen and display welcome message
-clear
-echo "====================================="
-echo "       RG35HAXX Custom Linux         "
-echo "====================================="
-echo "System ready. Starting shell..."
+# Start interactive shell on console
+echo "[init] Starting interactive shell on tty0..."
 exec /bin/sh
 EOF
     chmod +x init
