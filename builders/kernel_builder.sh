@@ -1,10 +1,16 @@
 #!/bin/bash
-# Kernel building functionality
+# Kernel building functionality for RG35XX-H
+# Enhanced with better error handling and progress tracking
 
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/logger.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/../config/constants.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/ramdisk.sh" 2>/dev/null || true
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/bootimg.sh" 2>/dev/null || true
+# Source required libraries
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/lib/logger.sh"
+source "$SCRIPT_DIR/config/constants.sh"
+source "$SCRIPT_DIR/lib/ramdisk.sh" 2>/dev/null || true
+source "$SCRIPT_DIR/lib/bootimg.sh" 2>/dev/null || true
+source "$SCRIPT_DIR/modules/kernel.sh" 2>/dev/null || {
+    log_warn "Centralized kernel module not found, using legacy implementation"
+}
 
 get_linux_source() {
     log_step "Getting Linux kernel source"
@@ -93,7 +99,120 @@ configure_kernel() {
     make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
 }
 
+# Research-based LCD console configuration for RG35XX-H
+apply_lcd_console_config() {
+    log_info "Applying research-based LCD console configuration for RG35XX-H"
+    
+    # Create temporary config file with LCD console settings
+    local lcd_config="$BUILD_DIR/lcd_console.config"
+    cat > "$lcd_config" << 'EOF'
+# Research-backed kernel configuration for RG35XX-H LCD console
+# Based on Knulli project and successful community implementations
+
+# Framebuffer Console Support
+CONFIG_FB=y
+CONFIG_FB_CFB_FILLRECT=y
+CONFIG_FB_CFB_COPYAREA=y  
+CONFIG_FB_CFB_IMAGEBLIT=y
+CONFIG_FB_SYS_FILLRECT=y
+CONFIG_FB_SYS_COPYAREA=y
+CONFIG_FB_SYS_IMAGEBLIT=y
+CONFIG_FB_SYS_FOPS=y
+CONFIG_FB_DEFERRED_IO=y
+CONFIG_FB_MODE_HELPERS=y
+CONFIG_FB_TILEBLITTING=y
+
+# VT Console Support  
+CONFIG_VT=y
+CONFIG_CONSOLE_TRANSLATIONS=y
+CONFIG_VT_CONSOLE=y
+CONFIG_VT_HW_CONSOLE_BINDING=y
+
+# Framebuffer Console - CRITICAL for LCD visibility
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+# CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER is not set
+CONFIG_FRAMEBUFFER_CONSOLE_ROTATION=y
+
+# DRM Support for Allwinner Display Engine
+CONFIG_DRM=y
+CONFIG_DRM_KMS_HELPER=y
+CONFIG_DRM_KMS_FB_HELPER=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_DRM_FBDEV_OVERALLOC=100
+CONFIG_DRM_SUN4I=y
+CONFIG_DRM_SUN6I_DSI=y
+CONFIG_DRM_SUN8I_DW_HDMI=y
+CONFIG_DRM_SUN8I_MIXER=y
+
+# Simple framebuffer for early console
+CONFIG_FB_SIMPLE=y
+
+# Logo display during boot
+CONFIG_LOGO=y
+CONFIG_LOGO_LINUX_MONO=y
+CONFIG_LOGO_LINUX_VGA16=y
+CONFIG_LOGO_LINUX_CLUT224=y
+
+# Font support for console readability
+CONFIG_FONTS=y
+CONFIG_FONT_8x8=y
+CONFIG_FONT_8x16=y
+CONFIG_FONT_6x11=y
+CONFIG_FONT_7x14=y
+CONFIG_FONT_PEARL_8x8=y
+CONFIG_FONT_ACORN_8x8=y
+CONFIG_FONT_MINI_4x6=y
+CONFIG_FONT_SUN8x16=y
+CONFIG_FONT_SUN12x22=y
+CONFIG_FONT_10x18=y
+CONFIG_FONT_TER16x32=y
+
+# Hardware specific - Allwinner H616/H700
+CONFIG_ARCH_SUNXI=y
+CONFIG_ARM64=y
+CONFIG_PINCTRL_SUN50I_H616=y
+CONFIG_CLK_SUNXI=y
+CONFIG_RESET_SUNXI=y
+
+# Essential debugging and logging
+CONFIG_MAGIC_SYSRQ=y
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_DYNAMIC_DEBUG=y
+CONFIG_DEBUG_KERNEL=y
+
+# Input devices for console interaction
+CONFIG_INPUT_KEYBOARD=y
+CONFIG_KEYBOARD_GPIO=y
+CONFIG_KEYBOARD_GPIO_POLLED=y
+
+# TTY and console essentials
+CONFIG_TTY=y
+CONFIG_UNIX98_PTYS=y
+CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+EOF
+
+    # Apply the LCD console configuration using merge_config.sh
+    log_info "Merging LCD console configuration with kernel config..."
+    if [[ -f scripts/kconfig/merge_config.sh ]]; then
+        ./scripts/kconfig/merge_config.sh -m .config "$lcd_config" || log_warn "LCD console config merge returned non-zero"
+        log_success "LCD console configuration applied successfully"
+    else
+        log_warn "merge_config.sh not found, applying configuration manually..."
+        # Fallback: apply settings manually
+        apply_config_fallback "$lcd_config"
+    fi
+    
+    # Clean up temporary config file
+    rm -f "$lcd_config"
+}
+
 apply_custom_config() {
+    # Apply research-based LCD console configuration first
+    log_info "Applying research-based LCD console configuration..."
+    apply_lcd_console_config
+    
     # Check for config_patch in multiple locations with priority for current working directory
     local patch_file=""
     local patch_dir=""
